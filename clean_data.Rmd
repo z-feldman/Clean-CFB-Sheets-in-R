@@ -1,0 +1,416 @@
+---
+title: "Clean_CFB_Sheets"
+author: "Zach Feldman"
+date: "4/8/2020"
+output: html_document
+---
+
+Cleaning CFB Sheets for Parker using GoogleSheets4
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(googlesheets4)
+library(tidyverse)
+library(stringr)
+library(magrittr)
+library(lubridate)
+library(glue)
+
+url <- "https://docs.google.com/spreadsheets/d/12ugtYqnMjEftPAfPfNfQFWe40DX2KWDWX2pO7a5dMnE/edit#gid=0"
+```
+
+Column Names we'll end up with (need to get columns consistent amongst sheets first).
+```{r}
+col_names <- c("ovr_rank", "team", "conference", "record", "ovr_rating", "off_rating", "off_rank", "def_rating", "def_rank", "st_rating", "st_rank")
+```
+
+Sheet names to read.
+```{r}
+sheet_names <- googlesheets4::sheets_sheets(url)
+```
+
+Read Sheets
+```{r}
+sheets <- map(.x = sheet_names, .f = ~ read_sheet(url, .x))
+```
+
+*Now need to fix inconsistency in columns*
+```{r}
+map(1:length(sheets), ~ names(sheets[[.x]]))
+```
+
+Quick glance, it looks like Sheet1 and Preseason are the ones that need fixing. Let's do it algorithmically
+
+Iterate over sheets, check if names of the previous sheet are equal to names of the current sheet by subtracting 1 (if the current sheet is the first, there is no previous, so don't subtract, it will just test against itself and return TRUE).
+
+```{r}
+map(.x = 1:(length(sheets)), 
+    .f = ~all.equal(target = names(sheets[[.x - if_else(.x == 1, 0, 1)]]),
+                    current = names(sheets[[.x]])))
+```
+
+
+Sheets 2:15 all have same columns and names so we'll use 2 as the baseline.
+```{r}
+names(sheets[[1]]) %in% names(sheets[[2]])
+
+names(sheets[[1]]); names(sheets[[2]])
+
+```
+
+
+Sheet1 has OVRRATING instead of RATING, but that is the same thing. It does not have SPECIAL TEAMS and STRANK at the end.
+
+```{r}
+sheets[[1]]$`SPECIAL TEAMS` <- NA
+sheets[[1]]$STRANK <- NA
+
+names(sheets[[1]]) <- names(sheets[[2]])
+```
+
+Now we should have the correct columns and names
+```{r}
+names(sheets[[1]]) %in% names(sheets[[2]])
+```
+Looks good.
+
+
+
+
+
+Now onto the preseason sheet.
+This looks like a little more work.
+
+```{r}
+names(sheets[[16]]) %in% names(sheets[[2]])
+
+names(sheets[[16]]); names(sheets[[2]])
+```
+
+
+RANK needs to be renamed to OVRRANK, conference is missing from 1:15, record, rating, offense, orank, defense, drank, special teams, strank are missing from 16 (Preseason).
+
+For conference, will left_join the conference into the other sheets based on school name - BUT APPARENTLY SCHOOL NAMES AREN"T CONSISTENT SO NOW I"M TILTING
+
+```{r}
+names(sheets[[16]])[1]
+
+names(sheets[[16]])[1] <- "OVRRANK"
+
+names(sheets[[16]])
+```
+
+Add record after conference (we will add conference after the team in 1:15), just set to 0-0. Then add offense, orank, defense, drank, special teams, strank.
+```{r}
+sheets[[16]] %<>% add_column(.after = "CONFERENCE", "RECORD" = "0-0")
+names(sheets[[16]]);names(sheets[[2]])
+
+sheets[[16]] %<>% add_column(.after = "RATING", "OFFENSE" = -1, "ORANK" = -1, "DEFENSE" = -1, "DRANK" = -1, "SPECIAL TEAMS" = -1, "STRANK" = -1)
+names(sheets[[16]]); names(sheets[[2]])
+```
+
+Now just add CONFERENCE to 1:15 after RECORD, can map() this. Then change the names of the columns to what we set before.
+```{r}
+sheets[1:15] <- map(.x = 1:(length(sheets) - 1), .f = ~add_column(sheets[[.x]], .after = "TEAM", "CONFERENCE" = "-1"))
+```
+This is hard coded for this specific case.
+
+Now set the column names to be 
+```{r}
+sheets <- map(.x = 1:length(sheets), .f = ~setNames(object = sheets[[.x]], nm = col_names))
+```
+
+
+
+
+*Now, time to clean school names.*
+
+Pull all the school names.
+```{r}
+all_teams <- map(.x = 1:length(sheets),.f = ~tibble("team" = sheets[[.x]]$team)) %>% bind_rows()
+```
+
+Check to see how many unique names there are
+```{r}
+all_teams %>% unique() %>% arrange(team)
+```
+
+Read in Parker's master team sheet
+```{r}
+master_teams <- read_csv("https://raw.githubusercontent.com/spfleming/CFB/master/logos.csv")
+```
+
+master_teams has many NAs in conference
+the Preseason tibble has conferences filled in
+If these two have the same team names then this will become much easier
+```{r}
+master_teams %>% filter(!is.na(conference)) %>% nrow()
+```
+There are 130 teams w/ a valid conference, that is a good start
+```{r}
+( sheets[[16]] %>% as.data.frame() %>% select(team) %>% arrange(team) ) == ( master_teams %>% filter(!is.na(conference)) %>% select(school) %>% arrange() )
+```
+
+
+Sad, but expected, these are not the same. Maybe just do it manually.
+Take following view, side-by-side it to right a case_when for fixing teams
+```{r}
+all_teams %>% unique() %>% arrange(team) %>% cbind(add_row(add_row(master_teams %>% filter(!is.na(conference)) %>% select(school, alt_name1, alt_name2, alt_name3) %>% arrange(school), school = rep(NA, 57)))) %>% View()
+```
+
+After looking through the names that are different, it appears that Parker's master team list uses "State" and not "St."
+
+If we make a function to change all St. to State, this saves us a lot of time
+
+Think alogorithmically... St. will always be at the end (we can remove trailing spaces to be safe). if we detect "St." we can change the string to be everything up until the final three characters, combined with "State"
+
+```{r}
+all_teams %>% mutate(team = case_when(
+                                    str_detect(string = team,
+                                               pattern = "St\\.") ~ 
+                                      str_replace(string = team, pattern =
+                                                    "St\\.",replacement = "State"),
+                                    TRUE ~ team
+                                    )
+                                  )
+```
+
+This works, now let's make it a function and map it to sheets. Then re-grab all_teams, and redisplay the five columns to manually fix the rest (or find another pattern to fix).
+
+
+```{r}
+fix_state_teams <- function(df) {
+  df %>% mutate(team = case_when(
+                   str_detect(string = team,
+                              pattern = "St\\.") ~ 
+                     str_replace(string = team, pattern =
+                                   "St\\.",replacement = "State"),
+                   
+                   TRUE ~ team
+                 )
+  ) %>% return()
+}
+
+all_teams %>% fix_state_teams()
+
+
+sheets <- map(.x = 1:16, .f = ~fix_state_teams(as.data.frame(sheets[.x])))
+
+```
+
+Now re-get all unique team names, fix rest manually/find another pattern
+```{r}
+all_teams <- map(.x = 1:length(sheets_temp),.f = ~tibble("team" = sheets_temp[[.x]]$team)) %>% bind_rows()
+all_teams %>% unique()
+```
+
+W00t, 21 teams fixed.
+
+Throw this up side-by-side again
+```{r}
+all_teams %>% unique() %>% arrange(team) %>% cbind(add_row(add_row(master_teams %>% filter(!is.na(conference)) %>% select(school, alt_name1, alt_name2, alt_name3) %>% arrange(school), school = rep(NA, nrow(all_teams %>% unique()) - nrow(master_teams %>% filter(!is.na(conference))) - 1)))) %>% View()
+```
+
+Start making a case when and just manually fix
+```{r}
+fix_manual_teams <- function(df){
+  df %>% mutate(team = case_when(
+    team == "App State" ~ "Appalachian State",
+    team == "BGSU" ~ "Bowling Green",
+    team == "Boston Coll." ~ "Boston College",
+    team == "CMU" ~ "Central Michigan",
+    team == "Coastal Caro." ~ "Coastal Carolina",
+    team == "ECU" ~ "East Carolina",
+    team == "EMU" ~ "Eastern Michigan",
+    team == "FAU" ~ "Florida Atlantic",
+    team == "FIU" ~ "Florida International",
+    team == "Ga Southern" ~ "Georgia Southern",
+    team == "Ga Tech" ~ "Georgia Tech",
+    team == "Hawaii" ~ "Hawai'i",
+    team == "La Tech" ~ "Louisiana Tech",
+    team == "Massachusetts" ~ "UMass",
+    team == "Miami-OH" ~ "Miami (OH)",
+    team == "Miami-Ohio" ~ "Miami (OH)",
+    team == "Miami-FL" ~ "Miami",
+    team == "Miss St" ~ "Mississippi State",
+    team == "Miss State" ~ "Mississippi State",
+    team == "Miss. State" ~ "Mississippi State",
+    team == "MTSU" ~ "Middle Tennessee",
+    team == "N Carolina" ~ "North Carolina",
+    team == "N Texas" ~ "North Texas",
+    team == "NMSU" ~ "New Mexico State",
+    team == "NIU" ~ "Northern Illinois",
+    team == "ODU" ~ "Old Dominion",
+    team == "S Alabama" ~ "South Alabama",
+    team == "S Carolina" ~ "South Carolina",
+    team == "So Miss" ~ "Southern Mississippi",
+    team == "Southern Miss" ~ "Southern Mississippi",
+    team == "UConn" ~ "Connecticut",
+    team == "UL-Layfayette" ~ "Lousisiana",
+    team == "UL-Monroe" ~ "Louisiana Monroe",
+    team == "Central Florida" ~ "UCF",
+    team == "USF" ~ "South Florida",
+    team == "UTSA" ~ "UT San Antonio",
+    team == "Va Tech" ~ "Virginia Tech",
+    team == "W Virginia" ~ "West Virginia",
+    team == "Wash St" ~ "Washington State",
+    team == "Wash State" ~ "Washington State",
+    team == "WKU" ~ "Western Kentucky",
+    team == "WMU" ~ "Western Michigan",
+    TRUE ~ team
+  )) %>% return()
+}
+```
+
+
+```{r}
+all_teams %>% fix_manual_teams() %>% unique()
+```
+Looks like there's 131 rows, not 130
+
+```{r}
+sheets <- map(.x = 1:16, .f = ~fix_manual_teams(as.data.frame(sheets[.x])))
+```
+
+```{r}
+all_teams <- map(.x = 1:length(sheets),.f = ~tibble("team" = sheets[[.x]]$team)) %>% bind_rows()
+
+all_teams %>% group_by(team) %>% summarise(count = n()) %>% filter(count != 16)
+```
+The S was South Alabama!
+```{r}
+fix_manual_teams <- function(df){
+  df %>% mutate(team = case_when(
+    team == "App State" ~ "Appalachian State",
+    team == "BGSU" ~ "Bowling Green",
+    team == "Boston Coll." ~ "Boston College",
+    team == "CMU" ~ "Central Michigan",
+    team == "Coastal Caro." ~ "Coastal Carolina",
+    team == "ECU" ~ "East Carolina",
+    team == "EMU" ~ "Eastern Michigan",
+    team == "FAU" ~ "Florida Atlantic",
+    team == "FIU" ~ "Florida International",
+    team == "Ga Southern" ~ "Georgia Southern",
+    team == "Ga Tech" ~ "Georgia Tech",
+    team == "Hawaii" ~ "Hawai'i",
+    team == "La Tech" ~ "Louisiana Tech",
+    team == "Massachusetts" ~ "UMass",
+    team == "Miami-OH" ~ "Miami (OH)",
+    team == "Miami-Ohio" ~ "Miami (OH)",
+    team == "Miami-FL" ~ "Miami",
+    team == "Miss St" ~ "Mississippi State",
+    team == "Miss State" ~ "Mississippi State",
+    team == "Miss. State" ~ "Mississippi State",
+    team == "MTSU" ~ "Middle Tennessee",
+    team == "N Carolina" ~ "North Carolina",
+    team == "N Texas" ~ "North Texas",
+    team == "NMSU" ~ "New Mexico State",
+    team == "NIU" ~ "Northern Illinois",
+    team == "ODU" ~ "Old Dominion",
+    team == "S Alabama" ~ "South Alabama",
+    team == "S Carolina" ~ "South Carolina",
+    team == "So Miss" ~ "Southern Mississippi",
+    team == "Southern Miss" ~ "Southern Mississippi",
+    team == "UConn" ~ "Connecticut",
+    team == "UL-Layfayette" ~ "Lousisiana",
+    team == "UL-Monroe" ~ "Louisiana Monroe",
+    team == "Central Florida" ~ "UCF",
+    team == "USF" ~ "South Florida",
+    team == "UTSA" ~ "UT San Antonio",
+    team == "Va Tech" ~ "Virginia Tech",
+    team == "W Virginia" ~ "West Virginia",
+    team == "Wash St" ~ "Washington State",
+    team == "Wash State" ~ "Washington State",
+    team == "WKU" ~ "Western Kentucky",
+    team == "WMU" ~ "Western Michigan",
+    team == "S" ~ "South Alabama",
+    TRUE ~ team,
+  )) %>% return()
+}
+```
+
+
+```{r}
+all_teams%>% fix_manual_teams() %>% unique()
+```
+130 unique rows, hallelujah.
+
+```{r}
+sheets <- map(.x = 1:16, .f = ~fix_manual_teams(as.data.frame(sheets[.x])))
+```
+
+```{r}
+all_teams <- map(.x = 1:length(sheets),.f = ~tibble("team" = sheets[[.x]]$team)) %>% bind_rows()
+
+all_teams %>% unique()
+```
+Still 130 unique rows after mapping over sheets and re-pulling names.
+
+
+*Now to fix record to be the record and not think it's a date.*
+When there is at least 1 win and 1 loss, R thinks it is a Month-Day date.
+```{r}
+sheets[[2]]$record
+```
+
+
+The "dates" are epoch time. numeric -> POSIXct -> date, then pull month and day
+```{r}
+test_date <- as.data.frame(sheets[[2]])
+as_date(as.POSIXct(as.numeric(test_date$record[11]), origin = '1970-01-01', tz = 'GMT'))
+
+
+
+```
+
+This gives us the output that we want. Let's make it into a function. 
+
+```{r}
+fix_record <- function(df){
+  df %>% mutate(record = case_when(
+    str_length(record) > 4 ~ as.character(glue("{month(as_date(as.POSIXct(as.numeric(.$record), origin = '1970-01-01', tz = 'GMT')))}-{day(as_date(as.POSIXct(as.numeric(.$record), origin = '1970-01-01', tz = 'GMT')))}")),
+    TRUE ~ as.character(record)
+  )) %>% return()
+}
+
+test_date %>% mutate(record = as.character(record),
+                     record = if_else(str_length(record) > 4, 
+                                      glue("{month(as_date(as.POSIXct(as.numeric(.$record), origin = '1970-01-01', tz ='GMT')))}-{day(as_date(as.POSIXct(as.numeric(.$record), origin = '1970-01-01', tz = 'GMT')))}"), 
+                                     record))
+
+suppressWarnings(fix_record(test_date))
+
+```
+The test_date %>% mutate() was for testing the function b/c there were issues with type conversion
+
+```{r}
+suppressWarnings(sheets <- map(.x = 1:16, .f = ~fix_record(as.data.frame(sheets[[.x]]))))
+```
+
+*Bind Rows!*
+```{r}
+full_data <- bind_rows(sheets[16], sheets[1:15])
+```
+
+We still need to fill in conference for everything other than preseason. Will also add week variable, this is just row_number integer divided by 130.
+```{r}
+full_data %<>% group_by(team) %>% mutate(conference = na_if(conference, -1),
+                                         off_rating = na_if(off_rating, -1),
+                                         off_rank = na_if(off_rank, -1),
+                                         def_rating = na_if(def_rating, -1),
+                                         def_rank = na_if(def_rank, -1),
+                                         st_rating = na_if(st_rating, -1),
+                                         st_rank = na_if(st_rank, -1)
+                                         ) %>% fill(conference) %>% ungroup()
+
+full_data %<>% mutate(week = dplyr::row_number() %/% 130)
+full_data %>% select(ovr_rank, team, conference, week, record, everything())
+```
+
+```{r}
+write_csv(full_data, "sp_2019_week_by_week.csv")
+```
+
+
+
+
+
