@@ -199,7 +199,7 @@ sheets <- map(.x = 1:16, .f = ~fix_state_teams(as.data.frame(sheets[.x])))
 
 Now re-get all unique team names, fix rest manually/find another pattern
 ```{r}
-all_teams <- map(.x = 1:length(sheets_temp),.f = ~tibble("team" = sheets_temp[[.x]]$team)) %>% bind_rows()
+all_teams <- map(.x = 1:length(sheets),.f = ~tibble("team" = sheets[[.x]]$team)) %>% bind_rows()
 all_teams %>% unique()
 ```
 
@@ -245,7 +245,7 @@ fix_manual_teams <- function(df){
     team == "So Miss" ~ "Southern Mississippi",
     team == "Southern Miss" ~ "Southern Mississippi",
     team == "UConn" ~ "Connecticut",
-    team == "UL-Layfayette" ~ "Lousisiana",
+    team == "UL-Lafayette" ~ "Lousisiana",
     team == "UL-Monroe" ~ "Louisiana Monroe",
     team == "Central Florida" ~ "UCF",
     team == "USF" ~ "South Florida",
@@ -391,7 +391,7 @@ suppressWarnings(sheets <- map(.x = 1:16, .f = ~fix_record(as.data.frame(sheets[
 full_data <- bind_rows(sheets[16], sheets[1:15])
 ```
 
-We still need to fill in conference for everything other than preseason. Will also add week variable, this is just row_number integer divided by 130.
+We still need to fill in conference for everything other than preseason. Will also add week variable, this is just row_number integer divided by 131.
 ```{r}
 full_data %<>% group_by(team) %>% mutate(conference = na_if(conference, -1),
                                          off_rating = na_if(off_rating, -1),
@@ -402,7 +402,7 @@ full_data %<>% group_by(team) %>% mutate(conference = na_if(conference, -1),
                                          st_rank = na_if(st_rank, -1)
                                          ) %>% fill(conference) %>% ungroup()
 
-full_data %<>% mutate(week = dplyr::row_number() %/% 130)
+full_data %<>% mutate(week = (dplyr::row_number() - 1) %/% 130)
 full_data %>% select(ovr_rank, team, conference, week, record, everything())
 ```
 
